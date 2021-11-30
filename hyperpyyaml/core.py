@@ -407,7 +407,10 @@ def _make_tuple(loader, node):
 def _load_node(loader, node):
     if isinstance(node, yaml.MappingNode):
         kwargs = loader.construct_mapping(node, deep=True)
-        return [], kwargs
+        if "args" in kwargs and "kwargs" in kwargs and len(kwargs) == 2:
+            return kwargs['args'], kwargs['kwargs']
+        else:
+            return [], kwargs
     elif isinstance(node, yaml.SequenceNode):
         args = loader.construct_sequence(node, deep=True)
         return args, {}
