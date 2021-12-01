@@ -17,6 +17,7 @@ import collections
 import ruamel.yaml
 import operator as op
 from io import StringIO
+from collections import OrderedDict
 
 
 # NOTE: Empty dict as default parameter is fine here since overrides are never
@@ -152,6 +153,7 @@ def load_hyperpyyaml(
     yaml_stream = resolve_references(
         yaml_stream, overrides, overrides_must_match
     )
+    # print(yaml_stream.getvalue())
 
     # Parse flat tuples (no nesting of lists, dicts)
     yaml.Loader.add_constructor(tag="!tuple", constructor=_make_tuple)
@@ -162,7 +164,7 @@ def load_hyperpyyaml(
     yaml.Loader.add_multi_constructor("!new:", _construct_object)
     yaml.Loader.add_multi_constructor("!name:", _construct_name)
     yaml.Loader.add_multi_constructor("!module:", _construct_module)
-    yaml.Loader.add_multi_constructor("!apply:", _apply_function)
+    # yaml.Loader.add_multi_constructor("!apply:", _apply_function)
 
     # NOTE: Here we apply a somewhat dirty trick.
     # We change the yaml object construction to be deep=True by default.
@@ -231,7 +233,7 @@ class Placeholder:
         return representer.represent_scalar(cls.yaml_tag, "")
 
 
-def dump_hyperpyyaml(yaml_tree, output_stream, *args, **kwargs):
+def dump_hyperpyyaml(yaml_tree, output_stream, indent=4, *args, **kwargs):
     r"""Dump yaml including placeholder and reference tags.
 
     Arguments
@@ -252,6 +254,7 @@ def dump_hyperpyyaml(yaml_tree, output_stream, *args, **kwargs):
     'a: !PLACEHOLDER\nb: !ref <a>\n'
     """
     ruamel_yaml = ruamel.yaml.YAML()
+    ruamel_yaml.old_indent = indent
     ruamel_yaml.representer.add_representer(RefTag, RefTag.to_yaml)
     ruamel_yaml.representer.add_representer(Placeholder, Placeholder.to_yaml)
     ruamel_yaml.dump(yaml_tree, output_stream, *args, **kwargs)
@@ -309,6 +312,7 @@ def resolve_references(yaml_stream, overrides=None, overrides_must_match=False):
     yaml_stream = StringIO()
     ruamel_yaml.dump(preview, yaml_stream)
     yaml_stream.seek(0)
+
 
     return yaml_stream
 
@@ -392,6 +396,11 @@ def _walk_tree_and_resolve(key, current_node, tree, overrides, file_path):
             ruamel_yaml = ruamel.yaml.YAML()
             current_node = ruamel_yaml.load(included_yaml)
 
+        # Get the value of the function
+        elif tag_value.startswith("!apply:"):
+            function = tag_value[len("!apply:") :]
+            current_node = _apply_function(function, current_node)
+
     # Return node after all resolution is done.
     return current_node
 
@@ -413,6 +422,19 @@ def _load_node(loader, node):
             return [], kwargs
     elif isinstance(node, yaml.SequenceNode):
         args = loader.construct_sequence(node, deep=True)
+        return args, {}
+    return [], {}
+
+
+def _get_args(node):
+    if str(node)[0] == 'o':
+        kwargs = OrderedDict(node)
+        if "args" in kwargs and "kwargs" in kwargs and len(kwargs) == 2:
+            return kwargs['args'], kwargs['kwargs']
+        else:
+            return [], kwargs
+    elif str(node)[0] == '[':
+        args = list(node)
         return args, {}
     return [], {}
 
@@ -475,7 +497,8 @@ def _construct_module(loader, module_name, node):
     return module
 
 
-def _apply_function(loader, callable_string, node):
+# def _apply_function(loader, callable_string, node):
+def _apply_function(callable_string, node):
     callable_ = pydoc.locate(callable_string)
     if callable_ is None:
         raise ImportError("There is no such callable as %s" % callable_string)
@@ -486,7 +509,8 @@ def _apply_function(loader, callable_string, node):
         )
 
     try:
-        args, kwargs = _load_node(loader, node)
+        # args, kwargs = _load_node(loader, node)
+        args, kwargs = _get_args(node)
         return callable_(*args, **kwargs)
     except TypeError as e:
         err_msg = "Invalid argument to callable %s" % callable_string
