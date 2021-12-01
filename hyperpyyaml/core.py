@@ -153,7 +153,6 @@ def load_hyperpyyaml(
     yaml_stream = resolve_references(
         yaml_stream, overrides, overrides_must_match
     )
-    # print(yaml_stream.getvalue())
 
     # Parse flat tuples (no nesting of lists, dicts)
     yaml.Loader.add_constructor(tag="!tuple", constructor=_make_tuple)
@@ -427,6 +426,8 @@ def _load_node(loader, node):
 
 
 def _get_args(node):
+    if str(node) == '':
+        return [], {}
     if str(node)[0] == 'o':
         kwargs = OrderedDict(node)
         if "args" in kwargs and "kwargs" in kwargs and len(kwargs) == 2:
