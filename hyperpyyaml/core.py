@@ -232,7 +232,7 @@ class Placeholder:
         return representer.represent_scalar(cls.yaml_tag, "")
 
 
-def dump_hyperpyyaml(yaml_tree, output_stream, indent=4, *args, **kwargs):
+def dump_hyperpyyaml(yaml_tree, output_stream, indent=2, *args, **kwargs):
     r"""Dump yaml including placeholder and reference tags.
 
     Arguments
@@ -259,7 +259,7 @@ def dump_hyperpyyaml(yaml_tree, output_stream, indent=4, *args, **kwargs):
     ruamel_yaml.dump(yaml_tree, output_stream, *args, **kwargs)
 
 
-def resolve_references(yaml_stream, overrides=None, overrides_must_match=False):
+def resolve_references(yaml_stream, overrides=None, overrides_must_match=False, indent=2):
     r'''Resolves inter-document references, a component of HyperPyYAML.
 
     Arguments
@@ -299,6 +299,7 @@ def resolve_references(yaml_stream, overrides=None, overrides_must_match=False):
     # Load once to store references and apply overrides
     # using ruamel.yaml to preserve the tags
     ruamel_yaml = ruamel.yaml.YAML()
+    ruamel_yaml.old_indent = indent
     preview = ruamel_yaml.load(yaml_stream)
 
     if overrides is not None and overrides != "":
