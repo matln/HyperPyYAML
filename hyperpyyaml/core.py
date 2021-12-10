@@ -513,7 +513,11 @@ def _apply_function(callable_string, node):
     try:
         # args, kwargs = _load_node(loader, node)
         args, kwargs = _get_args(node)
-        return callable_(*args, **kwargs)
+        out = callable_(*args, **kwargs)
+        if type(out) in [str, int, list, dict, float]:
+            return out
+        else:
+            return None
     except TypeError as e:
         err_msg = "Invalid argument to callable %s" % callable_string
         e.args = (err_msg, *e.args)
