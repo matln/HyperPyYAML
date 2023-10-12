@@ -18,14 +18,13 @@ import collections
 import ruamel.yaml
 import operator as op
 from io import StringIO
-from collections import OrderedDict
 from ruamel.yaml.representer import RepresenterError
 
 
 # NOTE: Empty dict as default parameter is fine here since overrides are never
 # modified
 def load_hyperpyyaml(
-    yaml_stream, overrides=None, overrides_must_match=True,
+    yaml_stream, overrides=None, overrides_must_match=True, loader=ruamel.yaml.Loader
 ):
     r'''This function implements the HyperPyYAML syntax
 
@@ -135,6 +134,9 @@ def load_hyperpyyaml(
         a corresponding key in the yaml_stream.
     return_dict : bool
         Whether to return a dictionary rather than the default namespace.
+    loader : Loader
+        Use to parse the yaml_stream, could be `ruamel.yaml.Loader`,
+        `yaml.Loader`, etc.
 
     Returns
     -------
@@ -152,20 +154,18 @@ def load_hyperpyyaml(
     >>> params["thing"]
     Counter({'b': 3})
     '''
-    yaml_stream = resolve_references(
-        yaml_stream, overrides, overrides_must_match
-    )
+    yaml_stream = resolve_references(yaml_stream, overrides, overrides_must_match)
 
     # Parse flat tuples (no nesting of lists, dicts)
-    yaml.Loader.add_constructor(tag="!tuple", constructor=_make_tuple)
+    loader.add_constructor(tag="!tuple", constructor=_make_tuple)
     tuple_pattern = re.compile(r"^\(.*\)$")
-    yaml.Loader.add_implicit_resolver("!tuple", tuple_pattern, first="(")
+    loader.add_implicit_resolver("!tuple", tuple_pattern, first="(")
 
     # Parse shortcuts to `new`, `name`, and `module`
-    yaml.Loader.add_multi_constructor("!new:", _construct_object)
-    yaml.Loader.add_multi_constructor("!name:", _construct_name)
-    yaml.Loader.add_multi_constructor("!module:", _construct_module)
-    yaml.Loader.add_multi_constructor("!apply:", _apply_function)
+    loader.add_multi_constructor("!new:", _construct_object)
+    loader.add_multi_constructor("!name:", _construct_name)
+    loader.add_multi_constructor("!module:", _construct_module)
+    loader.add_multi_constructor("!apply:", _apply_function)
 
     # NOTE: Here we apply a somewhat dirty trick.
     # We change the yaml object construction to be deep=True by default.
@@ -182,9 +182,15 @@ def load_hyperpyyaml(
     yaml.constructor.BaseConstructor.construct_object.__defaults__ = (
         True,
     )  # deep=True
-    hparams = yaml.load(yaml_stream, Loader=yaml.Loader)
+    ruamel.yaml.constructor.BaseConstructor.construct_object.__defaults__ = (
+        True,
+    )  # deep=True
+    hparams = yaml.load(yaml_stream, Loader=loader)
     # Change back to normal default:
     yaml.constructor.BaseConstructor.construct_object.__defaults__ = (
+        False,
+    )  # deep=False
+    ruamel.yaml.constructor.BaseConstructor.construct_object.__defaults__ = (
         False,
     )  # deep=False
 
@@ -304,30 +310,35 @@ def resolve_references(yaml_stream, overrides=None, overrides_must_match=False, 
     ruamel_yaml.old_indent = indent
     preview = ruamel_yaml.load(yaml_stream)
 
+    # Apply override changes to the preview tree
     if overrides is not None and overrides != "":
         if isinstance(overrides, str):
             overrides = ruamel_yaml.load(overrides)
-        recursive_update(preview, overrides, must_match=overrides_must_match)
-    _walk_tree_and_resolve("root", preview, preview, overrides, file_path)
+        try:
+            recursive_update(preview, overrides, must_match=overrides_must_match)
+        except TypeError:
+            raise ValueError(
+                "The structure of the overrides doesn't match "
+                "the structure of the document: ",
+                overrides,
+            )
+
+    # Resolve all !ref and !copy and !include tags
+    _walk_tree_and_resolve("root", preview, preview, file_path)
 
     yaml_stream = StringIO()
-    while True:
-        try:
-            ruamel_yaml = ruamel.yaml.YAML()
-            # Dump back to string so we can load with bells and whistles
-            ruamel_yaml.dump(preview, yaml_stream)
-            yaml_stream.seek(0)
-            break
-        except RepresenterError as e:
-            error_obj = str(e).split(': ')[1]
-            for key, value in preview._items():
-                if str(value) == error_obj:
-                    preview.update({key: str(value)})
+    try:
+        # Dump back to string so we can load with bells and whistles
+        ruamel_yaml.dump(preview, yaml_stream)
+        yaml_stream.seek(0)
+    except RepresenterError as e:
+        e.args = (e.args[0] + ". Please use the !apply tag instead.",)
+        raise e.with_traceback(e.__traceback__)
 
     return yaml_stream
 
 
-def _walk_tree_and_resolve(key, current_node, tree, overrides, file_path):
+def _walk_tree_and_resolve(key, current_node, tree, file_path):
     """A recursive function for resolving ``!ref``, ``!copy`` and ``!applyref`` tags.
 
     Loads additional yaml files if ``!include:`` tags are used.
@@ -341,8 +352,6 @@ def _walk_tree_and_resolve(key, current_node, tree, overrides, file_path):
         A node in the yaml tree loaded with ruamel.yaml.
     tree : node
         The base node in the yaml tree loaded with ruamel.yaml.
-    overrides : dict
-        A set of overrides to pass to any ``!includes:`` files.
     file_path : str
         The location of the directory storing the main yaml file
 
@@ -356,17 +365,13 @@ def _walk_tree_and_resolve(key, current_node, tree, overrides, file_path):
     if isinstance(current_node, list):
         for i, sub_node in enumerate(current_node):
             sub_key = i if key == "root" else f"{key}[{i}]"
-            current_node[i] = _walk_tree_and_resolve(
-                sub_key, sub_node, tree, overrides, file_path
-            )
+            current_node[i] = _walk_tree_and_resolve(sub_key, sub_node, tree, file_path)
 
     # Walk mapping and resolve.
     elif isinstance(current_node, dict):
         for k, sub_node in current_node.items():
             sub_key = k if key == "root" else f"{key}[{k}]"
-            current_node[k] = _walk_tree_and_resolve(
-                sub_key, sub_node, tree, overrides, file_path
-            )
+            current_node[k] = _walk_tree_and_resolve(sub_key, sub_node, tree, file_path)
 
     # Base case, handle tags
     if hasattr(current_node, "tag"):
@@ -390,15 +395,15 @@ def _walk_tree_and_resolve(key, current_node, tree, overrides, file_path):
         elif tag_value.startswith("!include:"):
             filename = tag_value[len("!include:"):]
 
-            # Update overrides with child keys
-            if isinstance(current_node, dict):
-                if overrides:
-                    recursive_update(overrides, current_node)
-                else:
-                    overrides = dict(current_node)
-
             if file_path is not None:
                 filename = os.path.join(file_path, filename)
+
+            # Turn current node into overrides dict for included file
+            try:
+                overrides = dict(current_node)
+            except TypeError:
+                overrides = {}
+
             with open(filename) as f:
                 included_yaml = resolve_references(f, overrides)
 
@@ -424,10 +429,16 @@ def _make_tuple(loader, node):
 
 
 def _load_node(loader, node):
-    if isinstance(node, yaml.MappingNode):
+    if (
+            isinstance(node, yaml.MappingNode) or
+            isinstance(node, ruamel.yaml.MappingNode)
+    ):
         kwargs = loader.construct_mapping(node, deep=True)
         return [], kwargs
-    elif isinstance(node, yaml.SequenceNode):
+    elif (
+            isinstance(node, yaml.SequenceNode) or
+            isinstance(node, ruamel.yaml.SequenceNode)
+    ):
         args = loader.construct_sequence(node, deep=True)
         return args, {}
     return [], {}
@@ -435,27 +446,24 @@ def _load_node(loader, node):
 
 def _get_args(node):
     # No arguments
-    if str(node) == '':
+    if not str(node):
         return [], {}
     # MappingNode
-    if str(node)[0] == 'o':
-        kwargs = OrderedDict(node)
+    if isinstance(node, dict):
         # Pass the positional and keyword arguments at the same time. Like `!!python/object/apply:module.function` in pyyaml
         # Example:
-        #     seed: 1024
-        #      __set_seed: !apply:libs.support.utils.set_all_seed
-        #         _args:
-        #             - !ref <seed>
-        #         _kwargs:
-        #             deterministic: True
-        if "_args" in kwargs and "_kwargs" in kwargs and len(kwargs) == 2:
-            return kwargs['_args'], kwargs['_kwargs']
+        # f: !applyref:sorted
+        #     _args:
+        #         - [3, 4, 1, 2]
+        #     _kwargs:
+        #         reverse: False
+        if "_args" in node and "_kwargs" in node and len(node) == 2:
+            return node['_args'], node['_kwargs']
         else:
-            return [], kwargs
+            return [], node
     # SequenceNode
-    elif str(node)[0] == '[':
-        args = list(node)
-        return args, {}
+    elif isinstance(node, list):
+        return node, {}
     else:
         raise ValueError
 
@@ -495,7 +503,9 @@ def _construct_name(loader, callable_string, node):
 
     try:
         args, kwargs = _load_node(loader, node)
-        return functools.partial(name, *args, **kwargs)
+        if args or kwargs:
+            return functools.partial(name, *args, **kwargs)
+        return name
     except TypeError as e:
         err_msg = "Invalid argument to callable %s" % callable_string
         e.args = (err_msg, *e.args)
@@ -511,9 +521,7 @@ def _construct_module(loader, module_name, node):
     if args != [] or kwargs != {}:
         raise ValueError("Cannot pass args to module")
     if not inspect.ismodule(module):
-        raise ValueError(
-            f"!module:{module_name} should be module, but is {module}"
-        )
+        raise ValueError(f"!module:{module_name} should be module, but is {module}")
 
     return module
 
@@ -602,7 +610,9 @@ def deref(ref, full_tree, copy_mode=False):
     if attr is not None:
         node = ruamel.yaml.comments.CommentedSeq()
         node += [branch, attr]
-        node.yaml_set_tag("!apply:getattr")
+        node.yaml_set_ctag(
+            ruamel.yaml.Tag(suffix="!apply:getattr")
+        )
         return node
 
     return branch
@@ -754,14 +764,19 @@ def recursive_update(d, u, must_match=False):
     >>> d
     {'a': 1, 'b': {'c': 2, 'd': 3}}
     """
+
+    # Ensure input type is correct
+    if not isinstance(d, collections.abc.Mapping):
+        raise TypeError(f"Expected to update a mapping, but got: {d}")
+    if not isinstance(u, collections.abc.Mapping):
+        raise TypeError(f"Expected a mapping to use for update, but got {u}")
+
     # TODO: Consider cases where u has branch off k, but d does not.
     # e.g. d = {"a":1}, u = {"a": {"b": 2 }}
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping) and k in d:
             recursive_update(d.get(k, {}), v)
         elif must_match and k not in d:
-            raise KeyError(
-                f"Override '{k}' not found in: {[key for key in d.keys()]}"
-            )
+            raise KeyError(f"Override '{k}' not found in: {[key for key in d.keys()]}")
         else:
             d[k] = v

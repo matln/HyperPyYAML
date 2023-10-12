@@ -179,28 +179,35 @@ def test_load_hyperpyyaml(tmpdir):
 
     # Applyref tag
     yaml = """
-    a: 1
-    b: 2
-    c: !applyref:sum [[!ref <a>, !ref <b>]]
+    # 1. Pass the positional and keyword arguments at the same time. Like `!!python/object/apply:module.function` in pyyaml
+    c: !applyref:sorted
+        _args:
+            - [3, 4, 1, 2]
+        _kwargs:
+            reverse: False
     d: !ref <c>-<c>
-    """
-    things = load_hyperpyyaml(yaml)
-    assert things["d"] == 0
 
-    # Applyref method
-    yaml = """
-    a: "A STRING"
-    common_kwargs:
-        thing1: !ref <a.lower>
-        thing2: 2
-    c: !applyref:hyperpyyaml.TestThing.from_keys
-        args:
-            - 1
-            - 2
-        kwargs: !ref <common_kwargs>
+    # 2. Only pass the keyword arguments
+    e: !applyref:random.randint
+        a: 1
+        b: 3
+    f: !ref <e><e>
+
+    # 3. Only pass the positional arguments
+    g: !applyref:random.randint
+        - 1
+        - 3
+    h: !ref <g><g>
+
+    # 4. No arguments
+    i: !applyref:random.random
+    j: !ref <i>
     """
     things = load_hyperpyyaml(yaml)
-    assert things["c"][:12] == "<hyperpyyaml"
+    assert things["d"] == "[1, 2, 3, 4]-[1, 2, 3, 4]"
+    assert things["f"] in [11, 22, 33]
+    assert things["h"] in [11, 22, 33]
+    assert things["j"] < 1 and things["j"] >= 0
 
     # Refattr:
     yaml = """
@@ -224,7 +231,7 @@ def test_load_hyperpyyaml(tmpdir):
 
     # Import
     imported_yaml = """
-    a: !PLACEHOLDER
+    a: 10
     b: !PLACEHOLDER
     c: !ref <a> // <b>
     """
@@ -236,18 +243,25 @@ def test_load_hyperpyyaml(tmpdir):
         w.write(imported_yaml)
 
     yaml = f"""
-    a: 3
     b: !PLACEHOLDER
     import: !include:{test_yaml_file}
-        a: !ref <a>
+        a: 3
         b: !ref <b>
     d: !ref <import[c]>
     """
 
     things = load_hyperpyyaml(yaml, {"b": 3})
-    assert things["a"] == things["b"]
+    assert things["import"]["a"] == things["b"]
     assert things["import"]["c"] == 1
     assert things["d"] == things["import"]["c"]
+
+    things = load_hyperpyyaml(yaml, {"import": {"a": 6}, "b": 3})
+    assert things["import"]["a"] == 6
+    assert things["import"]["c"] == 2
+
+    things = load_hyperpyyaml(yaml, "import:\n  a: 6\nb: 3\nd: 5")
+    assert things["import"]["a"] == 6
+    assert things["d"] == 5
 
     # Dumping
     dump_dict = {
@@ -263,3 +277,22 @@ def test_load_hyperpyyaml(tmpdir):
         "data_folder: !PLACEHOLDER\nexamples:\n"
         "  ex1: !ref <data_folder>/ex1.wav\n"
     )
+
+    # !include with override
+    yaml_1_path = os.path.join(tmpdir, 'f1.yaml')
+    yaml_2_path = os.path.join(tmpdir, 'f2.yaml')
+
+    yaml_1_content = f'''
+    k1: v1
+    k2: !include:{yaml_2_path}
+    '''
+    yaml_2_content = f'k3: v3'
+
+    with open(yaml_2_path, 'w') as f:
+        f.write(yaml_2_content)
+
+    loaded_yaml_1 = load_hyperpyyaml(yaml_1_content, overrides='k1: new_v1')
+    print(loaded_yaml_1)
+
+    assert loaded_yaml_1.get('k1') == 'new_v1'  # 'v1' is overridden by 'new_v1
+    assert loaded_yaml_1['k2'].get('k1') is None  # no unexpected key inserted to the included yaml file
